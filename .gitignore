@@ -1,0 +1,6 @@
+# build artifacts
+chip8
+*.o
+*.d
+# fetched external: Timendus test suite + game ROMs
+roms/

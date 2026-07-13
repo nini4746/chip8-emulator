@@ -22,6 +22,12 @@ void platform_poll_input(platform_t *p, uint8_t keypad[16], bool *quit);
 /* Draw the 64x32 framebuffer (each byte 0/1) scaled to the window. */
 void platform_render(platform_t *p, const uint8_t *framebuffer);
 
+/* Headless snapshot: write the 64x32 framebuffer (each byte 0/1), scaled by
+ * `scale`, to a BMP file at `path`. Needs no window or SDL_Init (uses only the
+ * SDL surface/file API). Returns 0 on success, nonzero on failure (message
+ * printed to stderr). */
+int platform_dump_bmp(const uint8_t *framebuffer, int scale, const char *path);
+
 /* Turn the square-wave beep on or off. */
 void platform_set_beep(platform_t *p, bool on);
 

@@ -180,6 +180,45 @@ void platform_render(platform_t *p, const uint8_t *framebuffer) {
     SDL_RenderPresent(p->renderer);
 }
 
+int platform_dump_bmp(const uint8_t *framebuffer, int scale, const char *path) {
+    if (scale < 1) scale = 1;
+    const int w = CHIP8_DISPLAY_WIDTH * scale;
+    const int h = CHIP8_DISPLAY_HEIGHT * scale;
+
+    /* 24-bit RGB (no alpha) so the output is a plain BMP that common tools
+     * (e.g. macOS `sips`) can read; 32-bit RGBA yields a V4-header BMP some
+     * decoders reject. */
+    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(
+        0, w, h, 24, SDL_PIXELFORMAT_RGB24);
+    if (!surf) {
+        fprintf(stderr, "error: SDL_CreateRGBSurface failed: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    SDL_LockSurface(surf);
+    uint8_t *rows = (uint8_t *)surf->pixels;
+    for (int y = 0; y < h; y++) {
+        const int sy = y / scale;
+        uint8_t *row = rows + (size_t)y * surf->pitch;
+        for (int x = 0; x < w; x++) {
+            const int sx = x / scale;
+            uint8_t v = framebuffer[sy * CHIP8_DISPLAY_WIDTH + sx] ? 0xFF : 0x00;
+            row[x * 3 + 0] = v;
+            row[x * 3 + 1] = v;
+            row[x * 3 + 2] = v;
+        }
+    }
+    SDL_UnlockSurface(surf);
+
+    int rc = SDL_SaveBMP(surf, path);
+    SDL_FreeSurface(surf);
+    if (rc != 0) {
+        fprintf(stderr, "error: SDL_SaveBMP failed: %s\n", SDL_GetError());
+        return -1;
+    }
+    return 0;
+}
+
 void platform_set_beep(platform_t *p, bool on) {
     if (p->audio == 0) return;
     p->beep_on = on ? 1 : 0;

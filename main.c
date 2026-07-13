@@ -18,8 +18,56 @@
 #define CHIP8_TIMER_HZ  60    /* timer + frame rate */
 #define DISPLAY_SCALE   10    /* integer pixel scale: 640x320 window */
 
+#define DUMP_SCALE       8       /* headless snapshot scale: 512x256 BMP */
+#define DUMP_DEFAULT_CYCLES 600000L /* CPU cycles before dumping (settle time) */
+
 static void usage(const char *prog) {
     fprintf(stderr, "usage: %s <rom>\n", prog);
+}
+
+#define DUMP_KEY_HOLD_CYCLES 40000L /* how long a scripted key is held down */
+
+/* Headless dump mode (CHIP8_DUMP set): run the CPU for `cycles` instructions
+ * with timers ticking at the normal CPU:timer ratio (no real-time pacing, no
+ * window), then write the framebuffer to `path` as a BMP. Returns process exit
+ * code. Leaves the interactive path untouched.
+ *
+ * If `key` is in 0x0..0xF, that hex key is injected as PRESSED for the first
+ * DUMP_KEY_HOLD_CYCLES cycles, then RELEASED for the remainder. This drives
+ * both the "is key down" (EX9E/EXA1) and FX0A (registers on release) paths so
+ * a menu-driven ROM (e.g. quirks platform picker) can advance. key < 0 = none. */
+static int run_headless(chip8_t *chip8, const char *path, long cycles, int key) {
+    const int ips_per_frame = CHIP8_CPU_HZ / CHIP8_TIMER_HZ;
+    long frames = cycles / ips_per_frame;
+    if (frames < 1)
+        frames = 1;
+    long executed = 0;
+
+    /* Mirror the interactive frame loop so the VIP display-wait quirk is
+     * honored headless: at most one DXYN draws per frame, timers tick once
+     * per frame. Without this the quirks test mis-detects display-wait. */
+    for (long f = 0; f < frames; f++) {
+        chip8->drew = false;
+        for (int i = 0; i < ips_per_frame; i++) {
+            if (key >= 0 && key < CHIP8_NUM_KEYS)
+                chip8->keypad[key] = (executed < DUMP_KEY_HOLD_CYCLES) ? 1 : 0;
+            chip8_cycle(chip8);
+            executed++;
+            if (chip8->status != CHIP8_RUN)
+                goto done;
+#if QUIRK_DISPLAY_WAIT
+            if (chip8->drew)
+                break;
+#endif
+        }
+        chip8_tick_timers(chip8);
+    }
+done:
+
+    if (platform_dump_bmp(chip8->display, DUMP_SCALE, path) != 0)
+        return 6;
+    fprintf(stderr, "[dump] wrote %s\n", path);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -34,6 +82,29 @@ int main(int argc, char **argv) {
     int rc = chip8_load_rom(&chip8, argv[1]);
     if (rc != 0)
         return rc;
+
+    /* Headless framebuffer dump: env-gated, no window, exits when done.
+     * Behavior is identical to before when CHIP8_DUMP is unset. */
+    const char *dump_path = getenv("CHIP8_DUMP");
+    if (dump_path && dump_path[0] != '\0') {
+        long cycles = DUMP_DEFAULT_CYCLES;
+        const char *cyc_env = getenv("CHIP8_DUMP_CYCLES");
+        if (cyc_env && cyc_env[0] != '\0') {
+            char *end = NULL;
+            long v = strtol(cyc_env, &end, 10);
+            if (end != cyc_env && v > 0)
+                cycles = v;
+        }
+        int key = -1;
+        const char *key_env = getenv("CHIP8_DUMP_KEY");
+        if (key_env && key_env[0] != '\0') {
+            char *end = NULL;
+            long k = strtol(key_env, &end, 16);
+            if (end != key_env && k >= 0 && k < CHIP8_NUM_KEYS)
+                key = (int)k;
+        }
+        return run_headless(&chip8, dump_path, cycles, key);
+    }
 
     platform_t *plat = platform_create(DISPLAY_SCALE);
     if (!plat)

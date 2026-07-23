@@ -27,6 +27,55 @@ static void usage(const char *prog) {
 
 #define DUMP_KEY_HOLD_CYCLES 40000L /* how long a scripted key is held down */
 
+#define KEYSEQ_MAX 64 /* max scripted key events (CHIP8_DUMP_KEYSEQ) */
+
+/* One scripted key transition, applied at the start of frame `frame`. */
+typedef struct {
+    long frame;
+    int  key;   /* 0x0..0xF */
+    int  down;  /* 1 = press, 0 = release */
+} keyev_t;
+
+/* Parse CHIP8_DUMP_KEYSEQ: comma list of "frame:key:d" / "frame:key:u"
+ * (frame decimal, key hex). Returns event count (0 on unset/parse failure).
+ * Example: "60:5:d,70:5:u" presses key 5 at frame 60, releases at 70. */
+static int parse_keyseq(const char *s, keyev_t *ev, int max) {
+    int n = 0;
+    if (!s || !*s)
+        return 0;
+    while (*s && n < max) {
+        char *end = NULL;
+        long frame = strtol(s, &end, 10);
+        if (end == s || *end != ':' || frame < 0)
+            return 0;
+        s = end + 1;
+        long key = strtol(s, &end, 16);
+        if (end == s || *end != ':' || key < 0 || key >= CHIP8_NUM_KEYS)
+            return 0;
+        s = end + 1;
+        if (*s != 'd' && *s != 'u')
+            return 0;
+        ev[n].frame = frame;
+        ev[n].key = (int)key;
+        ev[n].down = (*s == 'd');
+        n++;
+        s++;
+        if (*s == ',')
+            s++;
+        else if (*s != '\0')
+            return 0;
+    }
+    return n;
+}
+
+/* Extra headless instrumentation, all env-gated and off by default. */
+typedef struct {
+    keyev_t ev[KEYSEQ_MAX]; /* CHIP8_DUMP_KEYSEQ: scripted key transitions */
+    int     ev_count;
+    long    dump_every;     /* CHIP8_DUMP_EVERY: BMP every N frames */
+    FILE   *beep_log;       /* CHIP8_BEEP_LOG: per-frame sound_timer trace */
+} headless_opts_t;
+
 /* Headless dump mode (CHIP8_DUMP set): run the CPU for `cycles` instructions
  * with timers ticking at the normal CPU:timer ratio (no real-time pacing, no
  * window), then write the framebuffer to `path` as a BMP. Returns process exit
@@ -35,8 +84,16 @@ static void usage(const char *prog) {
  * If `key` is in 0x0..0xF, that hex key is injected as PRESSED for the first
  * DUMP_KEY_HOLD_CYCLES cycles, then RELEASED for the remainder. This drives
  * both the "is key down" (EX9E/EXA1) and FX0A (registers on release) paths so
- * a menu-driven ROM (e.g. quirks platform picker) can advance. key < 0 = none. */
-static int run_headless(chip8_t *chip8, const char *path, long cycles, int key) {
+ * a menu-driven ROM (e.g. quirks platform picker) can advance. key < 0 = none.
+ * (Use either CHIP8_DUMP_KEY or CHIP8_DUMP_KEYSEQ, not both: DUMP_KEY rewrites
+ * its key every cycle and would fight scripted transitions on the same key.)
+ *
+ * `opt` adds scripted key events (applied at frame boundaries), periodic BMP
+ * dumps ("<path>.f<frame>.bmp"), and a per-frame beep trace
+ * ("frame sound_timer pixels_lit" lines) - the hooks the interactive-item
+ * verification (keypad / beep / gameplay) drives. */
+static int run_headless(chip8_t *chip8, const char *path, long cycles, int key,
+                        const headless_opts_t *opt) {
     const int ips_per_frame = CHIP8_CPU_HZ / CHIP8_TIMER_HZ;
     long frames = cycles / ips_per_frame;
     if (frames < 1)
@@ -47,6 +104,10 @@ static int run_headless(chip8_t *chip8, const char *path, long cycles, int key) 
      * honored headless: at most one DXYN draws per frame, timers tick once
      * per frame. Without this the quirks test mis-detects display-wait. */
     for (long f = 0; f < frames; f++) {
+        for (int e = 0; e < opt->ev_count; e++) {
+            if (opt->ev[e].frame == f)
+                chip8->keypad[opt->ev[e].key] = opt->ev[e].down ? 1 : 0;
+        }
         chip8->drew = false;
         for (int i = 0; i < ips_per_frame; i++) {
             if (key >= 0 && key < CHIP8_NUM_KEYS)
@@ -61,6 +122,18 @@ static int run_headless(chip8_t *chip8, const char *path, long cycles, int key) 
 #endif
         }
         chip8_tick_timers(chip8);
+        if (opt->beep_log) {
+            int lit = 0;
+            for (int px = 0; px < CHIP8_DISPLAY_PIXELS; px++)
+                lit += chip8->display[px] ? 1 : 0;
+            fprintf(opt->beep_log, "%ld %u %d\n", f, chip8->sound_timer, lit);
+        }
+        if (opt->dump_every > 0 && f > 0 && f % opt->dump_every == 0) {
+            char fpath[1024];
+            snprintf(fpath, sizeof(fpath), "%s.f%05ld.bmp", path, f);
+            if (platform_dump_bmp(chip8->display, DUMP_SCALE, fpath) == 0)
+                fprintf(stderr, "[dump] wrote %s\n", fpath);
+        }
     }
 done:
 
@@ -78,6 +151,12 @@ int main(int argc, char **argv) {
 
     chip8_t chip8;
     chip8_init(&chip8);
+
+    /* CHIP8_SEED (env-gated): reseed CXNN's RNG after init's srand(time) so
+     * scripted verification runs are reproducible. Unset = normal behavior. */
+    const char *seed_env = getenv("CHIP8_SEED");
+    if (seed_env && seed_env[0] != '\0')
+        srand((unsigned)strtoul(seed_env, NULL, 10));
 
     int rc = chip8_load_rom(&chip8, argv[1]);
     if (rc != 0)
@@ -103,7 +182,23 @@ int main(int argc, char **argv) {
             if (end != key_env && k >= 0 && k < CHIP8_NUM_KEYS)
                 key = (int)k;
         }
-        return run_headless(&chip8, dump_path, cycles, key);
+        headless_opts_t opt = {0};
+        opt.ev_count = parse_keyseq(getenv("CHIP8_DUMP_KEYSEQ"),
+                                    opt.ev, KEYSEQ_MAX);
+        const char *every_env = getenv("CHIP8_DUMP_EVERY");
+        if (every_env && every_env[0] != '\0') {
+            char *end = NULL;
+            long v = strtol(every_env, &end, 10);
+            if (end != every_env && v > 0)
+                opt.dump_every = v;
+        }
+        const char *beep_env = getenv("CHIP8_BEEP_LOG");
+        if (beep_env && beep_env[0] != '\0')
+            opt.beep_log = fopen(beep_env, "w");
+        int hrc = run_headless(&chip8, dump_path, cycles, key, &opt);
+        if (opt.beep_log)
+            fclose(opt.beep_log);
+        return hrc;
     }
 
     platform_t *plat = platform_create(DISPLAY_SCALE);

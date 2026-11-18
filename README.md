@@ -153,6 +153,8 @@ chip8-emulator/
 
 - [`docs/SRS.md`](docs/SRS.md) - 요구사항 명세 (ISO/IEC/IEEE 29148)
 - [`docs/SDS.md`](docs/SDS.md) - 설계 명세: 구성도, 시퀀스, 자료구조, 상태, 모듈 (IEEE 1016)
+- [`docs/adr/`](docs/adr/README.md) - 설계 결정 기록
+- [`CHANGELOG.md`](CHANGELOG.md) - 변경 이력
 - [`.planning/SPEC.md`](.planning/SPEC.md) - 요구사항, 수용 기준, 범위 밖 항목과 이유
 - [`.planning/plans/`](.planning/plans/) - 구현 단계별 plan 4개
 
